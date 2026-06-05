@@ -1,0 +1,287 @@
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
+#include <dirent.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#define MAX_ROMS  256
+#define ROM_PATH  "/usr/share/roms"
+#define FONT_PATH "/usr/share/fonts/launcher.ttf"
+#define FONT_PATH "/usr/share/fonts/pixeldroidConsoleRegularMono.ttf"
+#define FONT_SIZE 20
+#define SCREEN_W  1280
+#define SCREEN_H  720
+#define VISIBLE   16
+
+typedef struct {
+    char name[256];
+    char path[512];
+} Rom;
+
+typedef struct {
+    const char *label;
+    const char *exts[4];
+    Rom roms[MAX_ROMS];
+    int count;
+} Tab;
+
+Tab tabs[3] = {
+    { "NES",  { ".nes", NULL } },
+    { "SNES", { ".sfc", ".smc", NULL } },
+    { "GBA",  { ".gba", NULL } },
+};
+#define NUM_TABS 3
+
+int cur_tab = 0;
+int selected = 0;
+int scroll   = 0;
+
+char usb_msg[256] = {0};
+
+static int ext_matches(const char *name, const char **exts) {
+    char *e = strrchr(name, '.');
+    if (!e) return 0;
+    for (int i = 0; exts[i]; i++)
+        if (strcmp(e, exts[i]) == 0) return 1;
+    return 0;
+}
+
+void scan_roms(void) {
+    for (int t = 0; t < NUM_TABS; t++) tabs[t].count = 0;
+
+    DIR *d = opendir(ROM_PATH);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char full[512];
+        snprintf(full, sizeof(full), "%s/%s", ROM_PATH, e->d_name);
+
+        /* check two levels deep */
+        if (e->d_type == DT_DIR) {
+            DIR *d2 = opendir(full);
+            if (!d2) continue;
+            struct dirent *e2;
+            while ((e2 = readdir(d2))) {
+                if (e2->d_name[0] == '.') continue;
+                char full2[512];
+                snprintf(full2, sizeof(full2), "%s/%s", full, e2->d_name);
+                for (int t = 0; t < NUM_TABS; t++) {
+                    if (tabs[t].count < MAX_ROMS &&
+                        ext_matches(e2->d_name, tabs[t].exts)) {
+                        snprintf(tabs[t].roms[tabs[t].count].path, 512, "%s", full2);
+                        snprintf(tabs[t].roms[tabs[t].count].name, 256, "%s", e2->d_name);
+                        tabs[t].count++;
+                    }
+                }
+            }
+            closedir(d2);
+        } else {
+            for (int t = 0; t < NUM_TABS; t++) {
+                if (tabs[t].count < MAX_ROMS &&
+                    ext_matches(e->d_name, tabs[t].exts)) {
+                    snprintf(tabs[t].roms[tabs[t].count].path, 512, "%s", full);
+                    snprintf(tabs[t].roms[tabs[t].count].name, 256, "%s", e->d_name);
+                    tabs[t].count++;
+                }
+            }
+        }
+    }
+    closedir(d);
+}
+
+void launch(const char *path) {
+    setenv("SDL_VIDEODRIVER", "kmsdrm", 1);
+    setenv("SDL_EVDEV_DEVICES", "/dev/input/event0:/dev/input/event1", 1);
+    SDL_Quit();
+    TTF_Quit();
+    execl("/usr/bin/mednafen", "mednafen",
+          "-video.driver", "opengl",
+          "-video.fs", "1",
+          path, NULL);
+}
+
+static void draw_text(SDL_Renderer *ren, TTF_Font *font,
+                      const char *text, SDL_Color col, int x, int y) {
+    SDL_Surface *s = TTF_RenderUTF8_Blended(font, text, col);
+    if (!s) return;
+    SDL_Texture *t = SDL_CreateTextureFromSurface(ren, s);
+    SDL_Rect r = {x, y, s->w, s->h};
+    SDL_RenderCopy(ren, t, NULL, &r);
+    SDL_FreeSurface(s);
+    SDL_DestroyTexture(t);
+}
+
+int main(void) {
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK);
+    TTF_Init();
+
+    SDL_Window   *win  = SDL_CreateWindow("",
+        0, 0, SCREEN_W, SCREEN_H, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    SDL_Renderer *ren  = SDL_CreateRenderer(win, -1,
+        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    TTF_Font     *font = TTF_OpenFont(FONT_PATH, FONT_SIZE);
+    TTF_Font     *big  = TTF_OpenFont(FONT_PATH, 48);
+
+    SDL_Joystick *joy = NULL;
+    if (SDL_NumJoysticks() > 0)
+        joy = SDL_JoystickOpen(0);
+
+    /* create pipe with O_RDWR to avoid blocking */
+    mkfifo("/tmp/launcher_cmd", 0666);
+    int pipefd = open("/tmp/launcher_cmd", O_RDWR | O_NONBLOCK);
+
+    scan_roms();
+
+    /* check for USB */
+    Uint32 usb_msg_until = 0;
+    FILE *f = fopen("/tmp/usb_result", "r");
+    if (f) {
+        fread(usb_msg, 1, sizeof(usb_msg) - 1, f);
+        fclose(f);
+        remove("/tmp/usb_result");
+        usb_msg_until = SDL_GetTicks() + 3000;
+    }
+
+    SDL_Color white  = {255, 255, 255, 255};
+    SDL_Color yellow = {255, 220,   0, 255};
+    SDL_Color gray   = { 80,  80,  80, 255};
+
+    int running = 1;
+    while (running) {
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) running = 0;
+
+            /* keyboard */
+            if (ev.type == SDL_KEYDOWN) {
+                switch (ev.key.keysym.scancode) {
+                    case SDL_SCANCODE_UP:    selected--;  break;
+                    case SDL_SCANCODE_DOWN:  selected++;  break;
+                    case SDL_SCANCODE_LEFT:
+                        cur_tab = (cur_tab + NUM_TABS - 1) % NUM_TABS;
+                        selected = scroll = 0; break;
+                    case SDL_SCANCODE_RIGHT:
+                        cur_tab = (cur_tab + 1) % NUM_TABS;
+                        selected = scroll = 0; break;
+                    case SDL_SCANCODE_RETURN:
+                        if (tabs[cur_tab].count)
+                            launch(tabs[cur_tab].roms[selected].path);
+                        break;
+                    case SDL_SCANCODE_ESCAPE: running = 0; break;
+                    default: break;
+                }
+            }
+
+            /* d-pad */
+            if (ev.type == SDL_JOYHATMOTION) {
+                if (ev.jhat.value == SDL_HAT_UP)    selected--;
+                if (ev.jhat.value == SDL_HAT_DOWN)  selected++;
+                if (ev.jhat.value == SDL_HAT_LEFT) {
+                    cur_tab = (cur_tab + NUM_TABS - 1) % NUM_TABS;
+                    selected = scroll = 0;
+                }
+                if (ev.jhat.value == SDL_HAT_RIGHT) {
+                    cur_tab = (cur_tab + 1) % NUM_TABS;
+                    selected = scroll = 0;
+                }
+            }
+
+            /* buttons: 5=launch */
+            if (ev.type == SDL_JOYBUTTONDOWN) {
+                if (ev.jbutton.button == 5 && tabs[cur_tab].count)
+                    launch(tabs[cur_tab].roms[selected].path);
+            }
+        }
+
+        /* read command from pipe */
+        if (pipefd >= 0) {
+            char cmd[16] = {0};
+            if (read(pipefd, cmd, sizeof(cmd) - 1) > 0) {
+                if (strcmp(cmd, "UP\n")     == 0) selected--;
+                if (strcmp(cmd, "DOWN\n")   == 0) selected++;
+                if (strcmp(cmd, "LEFT\n")   == 0) { cur_tab = (cur_tab + NUM_TABS - 1) % NUM_TABS; selected = scroll = 0; }
+                if (strcmp(cmd, "RIGHT\n")  == 0) { cur_tab = (cur_tab + 1) % NUM_TABS; selected = scroll = 0; }
+                if (strcmp(cmd, "LAUNCH\n") == 0 && tabs[cur_tab].count)
+                    launch(tabs[cur_tab].roms[selected].path);
+            }
+        }
+
+        /* */
+        int cnt = tabs[cur_tab].count;
+        if (selected < 0)            selected = 0;
+        if (cnt && selected >= cnt)  selected = cnt - 1;
+        if (selected < scroll)       scroll = selected;
+        if (selected >= scroll + VISIBLE) scroll = selected - VISIBLE + 1;
+
+        /* draw */
+        SDL_SetRenderDrawColor(ren, 15, 15, 25, 255);
+        SDL_RenderClear(ren);
+
+        /* tabs */
+        int tab_w = 160;
+        for (int t = 0; t < NUM_TABS; t++) {
+            int tx = 40 + t * (tab_w + 10);
+            if (t == cur_tab) {
+                SDL_SetRenderDrawColor(ren, 40, 40, 80, 255);
+                SDL_Rect bar = {tx - 10, 10, tab_w, 60};
+                SDL_RenderFillRect(ren, &bar);
+            }
+            if (big) draw_text(ren, big, tabs[t].label,
+                               t == cur_tab ? yellow : gray, tx, 15);
+        }
+
+        /* divider */
+        SDL_SetRenderDrawColor(ren, 60, 60, 100, 255);
+        SDL_RenderDrawLine(ren, 30, 78, SCREEN_W - 30, 78);
+
+        /* rom list */
+        if (cnt == 0) {
+            if (font) draw_text(ren, font, "No ROMs found", gray, 50, 120);
+        } else {
+            for (int i = 0; i < VISIBLE && (scroll + i) < cnt; i++) {
+                int idx = scroll + i;
+                int y   = 90 + i * 36;
+                if (idx == selected) {
+                    SDL_SetRenderDrawColor(ren, 40, 40, 80, 255);
+                    SDL_Rect bar = {30, y, SCREEN_W - 60, 34};
+                    SDL_RenderFillRect(ren, &bar);
+                }
+                if (font) draw_text(ren, font,
+                    tabs[cur_tab].roms[idx].name,
+                    idx == selected ? yellow : white,
+                    50, y + 4);
+            }
+        }
+
+        /* USB import message */
+        if (usb_msg[0] && SDL_GetTicks() < usb_msg_until) {
+            SDL_SetRenderDrawColor(ren, 30, 30, 60, 255);
+            SDL_Rect box = {30, SCREEN_H - 120, SCREEN_W - 60, 80};
+            SDL_RenderFillRect(ren, &box);
+            if (font) draw_text(ren, font, "USB ROMs imported:", yellow, 50, SCREEN_H - 115);
+            if (font) draw_text(ren, font, usb_msg,             white,  50, SCREEN_H - 82);
+        } else {
+            usb_msg[0] = 0;
+        }
+
+        /* hint */
+        if (font) draw_text(ren, font,
+            "LEFT/RIGHT: switch tab   UP/DOWN: navigate   START: launch   SELECT: quit",
+            gray, 40, SCREEN_H - 40);
+
+        SDL_RenderPresent(ren);
+        SDL_Delay(16);
+    }
+
+    if (pipefd >= 0) close(pipefd);
+    if (joy) SDL_JoystickClose(joy);
+    TTF_CloseFont(font);
+    TTF_CloseFont(big);
+    TTF_Quit();
+    SDL_Quit();
+    return 0;
+}

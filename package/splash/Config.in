@@ -1,0 +1,8 @@
+config BR2_PACKAGE_SPLASH
+    bool "splash"
+    depends on BR2_PACKAGE_SDL2
+    depends on BR2_PACKAGE_SDL2_TTF
+    depends on BR2_PACKAGE_SDL2_MIXER
+    depends on BR2_PACKAGE_SDL2_IMAGE
+    help
+      Boot splash screen with image and sound.

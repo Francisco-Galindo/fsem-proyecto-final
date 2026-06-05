@@ -1,0 +1,114 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+
+#define PORT 8080
+#define PIPE "/tmp/launcher_cmd"
+
+static const char PAGE[] =
+    "HTTP/1.1 200 OK\r\n"
+    "Content-Type: text/html\r\n"
+    "Connection: close\r\n"
+    "\r\n"
+    "<!DOCTYPE html><html><head>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Arcade</title>"
+    "<style>"
+    "body{background:#0f0f19;display:flex;flex-direction:column;"
+    "align-items:center;justify-content:center;height:100vh;margin:0;gap:12px}"
+    "h1{color:#ffdc00;font-family:monospace}"
+    ".row{display:flex;gap:12px}"
+    "button{background:#28284f;color:white;border:2px solid #ffdc00;"
+    "border-radius:8px;font-size:32px;width:90px;height:90px;cursor:pointer}"
+    "button:active{background:#ffdc00;color:black}"
+    ".launch{width:200px;font-size:22px;background:#ffdc00;color:black;font-weight:bold}"
+    "</style></head><body>"
+    "<h1>ARCADE</h1>"
+    "<div class='row'>"
+    "<button onclick=\"cmd('LEFT')\">&#9664;</button>"
+    "<button onclick=\"cmd('UP')\">&#9650;</button>"
+    "<button onclick=\"cmd('RIGHT')\">&#9654;</button>"
+    "</div>"
+    "<div class='row'>"
+    "<button onclick=\"cmd('DOWN')\">&#9660;</button>"
+    "</div>"
+    "<div class='row'>"
+    "<button class='launch' onclick=\"cmd('LAUNCH')\">&#9654; LAUNCH</button>"
+    "</div>"
+    "<script>"
+    "function cmd(c){"
+    "fetch('/'+c).catch(()=>{});"
+    "}"
+    "</script>"
+    "</body></html>\r\n";
+
+static const char OK[] =
+    "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+
+static void send_cmd(const char *cmd) {
+    int fd = open(PIPE, O_WRONLY | O_NONBLOCK);
+    if (fd >= 0) {
+        write(fd, cmd, strlen(cmd));
+        close(fd);
+        printf("[remote] sent: %s", cmd);
+    } else {
+        printf("[remote] pipe not ready, dropped command: %s", cmd);
+    }
+    fflush(stdout);
+}
+
+int main(void) {
+    printf("[remote] starting on port %d\n", PORT);
+    fflush(stdout);
+
+    int srv = socket(AF_INET, SOCK_STREAM, 0);
+    int opt = 1;
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port        = htons(PORT);
+    bind(srv, (struct sockaddr *)&addr, sizeof(addr));
+    listen(srv, 4);
+
+    printf("[remote] listening\n");
+    fflush(stdout);
+
+    while (1) {
+        int cli = accept(srv, NULL, NULL);
+        if (cli < 0) continue;
+
+        char buf[256] = {0};
+        read(cli, buf, sizeof(buf) - 1);
+
+        char path[32] = {0};
+        sscanf(buf, "GET %31s", path);
+
+        printf("[remote] GET %s\n", path);
+        fflush(stdout);
+
+        if (strcmp(path, "/UP") == 0) {
+            send_cmd("UP\n");
+        } else if (strcmp(path, "/DOWN") == 0) {
+            send_cmd("DOWN\n");
+        } else if (strcmp(path, "/LEFT") == 0) {
+            send_cmd("LEFT\n");
+        } else if (strcmp(path, "/RIGHT") == 0) {
+            send_cmd("RIGHT\n");
+        } else if (strcmp(path, "/LAUNCH") == 0) {
+            send_cmd("LAUNCH\n");
+        }
+
+        if (strcmp(path, "/") == 0)
+            write(cli, PAGE, sizeof(PAGE) - 1);
+        else
+            write(cli, OK, sizeof(OK) - 1);
+
+        close(cli);
+    }
+    return 0;
+}

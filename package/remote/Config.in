@@ -1,0 +1,4 @@
+config BR2_PACKAGE_REMOTE
+    bool "remote"
+    help
+      Simple HTTP remote control server for the arcade launcher.

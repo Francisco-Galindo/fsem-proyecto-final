@@ -1,0 +1,80 @@
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_mixer.h>
+#include <SDL2/SDL_image.h>
+
+#define SCREEN_W   1280
+#define SCREEN_H   720
+#define SPLASH_MS  4000   /* total display time in ms */
+
+#define IMAGE_PATH "/usr/share/arcade/splash.png"
+#define SOUND_PATH "/usr/share/arcade/splash.wav"
+#define FONT_PATH  "/usr/share/fonts/launcher.ttf"
+
+int main(void) {
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO);
+    TTF_Init();
+    IMG_Init(IMG_INIT_PNG);
+    Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048);
+
+    SDL_Window   *win = SDL_CreateWindow("",
+        0, 0, SCREEN_W, SCREEN_H, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+
+    /* black background */
+    SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+    SDL_RenderClear(ren);
+
+    /* load and draw image centered */
+    SDL_Surface *img = IMG_Load(IMAGE_PATH);
+    if (img) {
+        SDL_Texture *tex = SDL_CreateTextureFromSurface(ren, img);
+        SDL_Rect dst = {
+            (SCREEN_W - img->w) / 2,
+            (SCREEN_H - img->h) / 2,
+            img->w, img->h
+        };
+        SDL_RenderCopy(ren, tex, NULL, &dst);
+        SDL_FreeSurface(img);
+        SDL_DestroyTexture(tex);
+    } else {
+        /* fallback: just show text if no image */
+        TTF_Font *font = TTF_OpenFont(FONT_PATH, 72);
+        if (font) {
+            SDL_Color white = {255, 255, 255, 255};
+            SDL_Surface *s = TTF_RenderUTF8_Blended(font, "ARCADE", white);
+            SDL_Texture *t = SDL_CreateTextureFromSurface(ren, s);
+            SDL_Rect r = {(SCREEN_W - s->w) / 2, (SCREEN_H - s->h) / 2, s->w, s->h};
+            SDL_RenderCopy(ren, t, NULL, &r);
+            SDL_FreeSurface(s);
+            SDL_DestroyTexture(t);
+            TTF_CloseFont(font);
+        }
+    }
+
+    SDL_RenderPresent(ren);
+
+    /* play sound */
+    Mix_Chunk *sound = Mix_LoadWAV(SOUND_PATH);
+    if (sound) Mix_PlayChannel(-1, sound, 0);
+
+    /* wait SPLASH_MS or until keypress/button */
+    Uint32 start = SDL_GetTicks();
+    SDL_Event ev;
+    while (SDL_GetTicks() - start < SPLASH_MS) {
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_KEYDOWN ||
+                ev.type == SDL_JOYBUTTONDOWN ||
+                ev.type == SDL_QUIT) goto done;
+        }
+        SDL_Delay(16);
+    }
+
+done:
+    if (sound) Mix_FreeChunk(sound);
+    Mix_CloseAudio();
+    IMG_Quit();
+    TTF_Quit();
+    SDL_Quit();
+    return 0;
+}

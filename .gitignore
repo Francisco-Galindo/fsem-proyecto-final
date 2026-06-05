@@ -1,0 +1,6 @@
+output/
+dl/
+*.tar.*
+*.tar
+.config.old
+board/raspberrypi4-64/rootfs-overlay/usr/share/roms/
